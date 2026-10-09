@@ -1,0 +1,110 @@
+name: 🐛 Bug report
+description: Report a reproducible bug or regression in this library.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        # Bug report
+
+        Step recording depends on the phone's hardware and its Google Play services, so most
+        bugs can't be diagnosed without the device details below. Please fill them all in.
+
+        Questions and setup help belong in [Discussions](https://github.com/Mister-Gee/react-native-recording-api/discussions).
+  - type: checkboxes
+    attributes:
+      label: Before submitting a new issue
+      options:
+        - label: I tested with the latest version of this library.
+          required: true
+        - label: I tested on a physical Android device. Most emulators have no step counter and report `no_sensor`.
+          required: true
+        - label: I searched existing issues for duplicates.
+          required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened, and what did you expect?
+      description: Include error codes (`RecordingApiError.code`) and messages, or a stack trace.
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `getStatus()` and `subscribe()`
+      description: Paste what each one resolved to just before the problem.
+      placeholder: |
+        getStatus(): ready
+        subscribe(): ready
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: read
+    attributes:
+      label: The `readSteps` call and its result
+      description: |
+        The exact options you passed (`startTime`, `endTime`, `bucketMinutes`) and the buckets
+        you got back, or the error. Note your device's time zone. Skip this if the bug isn't
+        about reading.
+      render: ts
+  - type: input
+    id: library-version
+    attributes:
+      label: Library version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Phone model
+      placeholder: "Pixel 8, Samsung Galaxy A54, ..."
+    validations:
+      required: true
+  - type: input
+    id: android-version
+    attributes:
+      label: Android version
+      placeholder: "14 (API 34)"
+    validations:
+      required: true
+  - type: input
+    id: play-services-version
+    attributes:
+      label: Google Play services version
+      description: Settings > Apps > Google Play services > App details (at the bottom).
+      placeholder: "25.38.33"
+    validations:
+      required: true
+  - type: dropdown
+    id: app-type
+    attributes:
+      label: App type
+      options:
+        - Expo (development build / prebuild)
+        - React Native CLI
+    validations:
+      required: true
+  - type: textarea
+    id: react-native-info
+    attributes:
+      label: Environment info
+      description: Paste the output of `npx react-native info` (React Native CLI) or `npx expo-env-info` (Expo).
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+    validations:
+      required: true
+  - type: input
+    id: reproducible-example
+    attributes:
+      label: Reproducible example repository
+      description: Optional. A minimal repo helps for setup or build bugs. Device-specific step bugs often can't be reproduced elsewhere.
