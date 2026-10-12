@@ -35,8 +35,7 @@ export default function App() {
     run(async () => setStatus(await getStatus()));
   }, [run]);
 
-  // 15-minute buckets sit on the UTC grid, which every real time-zone offset
-  // also lands on, so local midnight is a bucket boundary and nothing is dropped.
+  // Read the caller's local calendar day starting at local midnight.
   const readToday = () =>
     run(async () =>
       setBuckets(await readSteps({ startTime: startOfLocalDay() }))

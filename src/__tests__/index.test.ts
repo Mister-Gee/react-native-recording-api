@@ -129,6 +129,32 @@ describe('status and subscription', () => {
 });
 
 describe('readSteps', () => {
+  it.each([7, 100, 1441, 2_147_483_647])(
+    'preserves a short unaligned range and explicit zero with width %p',
+    async (bucketMinutes) => {
+      const start = Date.UTC(2026, 9, 8, 12, 7);
+      const end = Date.UTC(2026, 9, 8, 12, 12);
+      mockNative.readSteps.mockResolvedValue([
+        { startMs: start, endMs: end, steps: 0 },
+      ]);
+
+      await expect(
+        readSteps({ startTime: start, endTime: end, bucketMinutes })
+      ).resolves.toEqual([
+        {
+          startTime: '2026-10-08T12:07:00.000Z',
+          endTime: '2026-10-08T12:12:00.000Z',
+          steps: 0,
+        },
+      ]);
+      expect(mockNative.readSteps).toHaveBeenCalledWith(
+        start,
+        end,
+        bucketMinutes
+      );
+    }
+  );
+
   it('accepts Date, ISO and epoch inputs and returns ISO buckets', async () => {
     mockNative.readSteps.mockResolvedValue([
       {
@@ -164,7 +190,7 @@ describe('readSteps', () => {
     expect(mockNative.readSteps).toHaveBeenCalledWith(1_000, 5_000_000, 15);
   });
 
-  it.each([0, 7, 15.5, -15, 1441, 2880, Number.NaN])(
+  it.each([0, 15.5, -15, 2_147_483_648, Number.NaN, Number.POSITIVE_INFINITY])(
     'rejects bucketMinutes=%p before calling native',
     async (bucketMinutes) => {
       await expect(
@@ -213,12 +239,15 @@ describe('readSteps', () => {
 });
 
 describe('isValidBucketMinutes', () => {
-  it('accepts exactly the divisors of a day', () => {
+  it('accepts every positive whole provider-representable width', () => {
     expect(
-      [1, 5, 15, 30, 60, 120, 360, 720, 1440].every(isValidBucketMinutes)
+      [1, 7, 100, 1440, 1441, 2880, 2_147_483_647].every(isValidBucketMinutes)
     ).toBe(true);
-    expect([45, 90].every(isValidBucketMinutes)).toBe(true);
-    expect([0, 7, 11, 100, 1441, 2.5].some(isValidBucketMinutes)).toBe(false);
+    expect(
+      [0, -1, 2.5, 2_147_483_648, Number.NaN, Number.POSITIVE_INFINITY].some(
+        isValidBucketMinutes
+      )
+    ).toBe(false);
   });
 });
 

@@ -3,7 +3,8 @@ import NativeRecordingApi from './module';
 import type { Spec } from './NativeRecordingApi';
 
 /**
- * Whether steps can be recorded and read right now.
+ * Whether the device prerequisites for the Recording API are currently met.
+ * `ready` does not establish that a recording subscription is active.
  *
  * - `ready`: permission granted, step sensor present, Play services new enough.
  * - `needs_permission`: `ACTIVITY_RECOGNITION` not granted (Android 10+).
@@ -24,9 +25,9 @@ export type RecordingStatus =
 export type SubscribeResult = RecordingStatus | 'subscription_failed';
 
 export interface StepBucket {
-  /** ISO-8601 UTC instant; inclusive. */
+  /** Provider interval boundary after retention/query clipping. */
   startTime: string;
-  /** ISO-8601 UTC instant; exclusive. */
+  /** Provider interval boundary; no exclusive-end or half-open guarantee is made. */
   endTime: string;
   steps: number;
 }
@@ -39,8 +40,8 @@ export interface ReadStepsOptions {
   /** Defaults to now. Clamped to now. */
   endTime?: TimeInput;
   /**
-   * Bucket width in minutes. Must divide a day evenly (1, 5, 15, 30, 60, 1440, ...).
-   * Buckets sit on a fixed UTC epoch grid. Defaults to 15.
+   * Provider bucket width in minutes. Any whole number from 1 through 2,147,483,647.
+   * Defaults to 15. Returned intervals may depend on the request and provider state.
    */
   bucketMinutes?: number;
 }
@@ -84,19 +85,16 @@ export class RecordingApiError extends Error {
 /** Play services keeps at most this many days of recorded data. */
 export const RETENTION_DAYS = 10;
 export const DEFAULT_BUCKET_MINUTES = 15;
-const MINUTES_PER_DAY = 1440;
+const MAX_BUCKET_MINUTES = 2_147_483_647;
 
 export function isSupported(): boolean {
   return Platform.OS === 'android';
 }
 
-/** True when `minutes` is a whole number of minutes that divides a day evenly. */
+/** True when `minutes` fits the provider's positive whole-number argument. */
 export function isValidBucketMinutes(minutes: number): boolean {
   return (
-    Number.isInteger(minutes) &&
-    minutes >= 1 &&
-    minutes <= MINUTES_PER_DAY &&
-    MINUTES_PER_DAY % minutes === 0
+    Number.isInteger(minutes) && minutes >= 1 && minutes <= MAX_BUCKET_MINUTES
   );
 }
 
@@ -168,7 +166,7 @@ export async function requestPermission(): Promise<RecordingStatus> {
 
 /**
  * Start (or renew) background step recording in Play services. Idempotent and
- * safe to call on every app start; concurrent calls share one subscription task.
+ * safe to call on every app start; adjacent concurrent calls share one provider task.
  * Resolves `ready` on success, otherwise the blocking status or `subscription_failed`.
  */
 export async function subscribe(): Promise<SubscribeResult> {
@@ -186,13 +184,12 @@ export async function unsubscribe(): Promise<void> {
 }
 
 /**
- * Read recorded steps as UTC-grid buckets. Requires `subscribe()` first.
+ * Read recorded steps in provider-created intervals. Requires `subscribe()` first.
  *
- * - The start is rounded up to the next bucket boundary (and to the retention
- *   limit), so a partially covered leading bucket is omitted rather than
- *   under-counted. Pass a boundary-aligned start to keep it.
- * - The end is clamped to now; the trailing bucket may be partial.
- * - Buckets with zero steps are omitted.
+ * - The exact caller range is clamped to the last 10 days and now, without grid rounding.
+ * - Google treats both provider query bounds as inclusive; this wrapper applies no +/-1 ms.
+ * - Present zero/empty datasets are returned as zero buckets; missing datasets are omitted.
+ * - Positive counts are rejected when their aggregate intervals do not fit the query.
  */
 export async function readSteps(
   options: ReadStepsOptions
@@ -207,7 +204,7 @@ export async function readSteps(
   if (!isValidBucketMinutes(bucketMinutes)) {
     throw new RecordingApiError(
       'ERR_INVALID_BUCKET',
-      `bucketMinutes must be a whole number that divides ${MINUTES_PER_DAY}; got ${bucketMinutes}`
+      `bucketMinutes must be a whole number from 1 through ${MAX_BUCKET_MINUTES}; got ${bucketMinutes}`
     );
   }
   const start = toEpochMs(options.startTime);

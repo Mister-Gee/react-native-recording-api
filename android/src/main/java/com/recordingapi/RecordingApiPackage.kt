@@ -19,12 +19,12 @@ class RecordingApiPackage : BaseReactPackage() {
   override fun getReactModuleInfoProvider() = ReactModuleInfoProvider {
     mapOf(
       RecordingApiModule.NAME to ReactModuleInfo(
-        name = RecordingApiModule.NAME,
-        className = RecordingApiModule.NAME,
-        canOverrideExistingModule = false,
-        needsEagerInit = false,
-        isCxxModule = false,
-        isTurboModule = true
+        RecordingApiModule.NAME,
+        RecordingApiModule.NAME,
+        false,
+        false,
+        false,
+        true
       )
     )
   }

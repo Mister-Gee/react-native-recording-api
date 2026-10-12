@@ -3,14 +3,14 @@
 On-device Android step counting with Google's [Recording API on mobile](https://developer.android.com/health-and-fitness/recording-api)
 (`play-services-fitness` `LocalRecordingClient`). No Google account, no Health Connect,
 no foreground service: Play services records steps in the background and you read them
-back in fixed UTC buckets.
+back in provider-created time buckets.
 
 Works in **Expo** (development builds / prebuild) and **React Native CLI** apps. It is a
 plain TurboModule with no Expo dependency and no config plugin to add.
 
 - Explicit readiness states, so you know *why* steps are unavailable
-- Concurrency-safe, idempotent `subscribe()`
-- Bucketed reads on a fixed UTC grid, so overlapping reads agree on closed buckets
+- Ordered, concurrency-safe `subscribe()` and `unsubscribe()` mutations
+- Caller-selected ranges and positive whole-minute provider bucket widths
 - Validates the buckets Play services returns instead of passing through malformed data
 - iOS and web: a typed no-op (`unsupported`), never a crash
 
@@ -70,6 +70,9 @@ const today = buckets.reduce((sum, b) => sum + b.steps, 0);
 | `play_services_missing` | Play services is absent, disabled or invalid |
 | `unsupported` | Not Android |
 
+`ready` describes device prerequisites, not an active subscription. Call `subscribe()`
+before reading.
+
 ### `requestPermission(): Promise<RecordingStatus>`
 
 Requests `ACTIVITY_RECOGNITION` through `PermissionsAndroid` on Android 10+ (older versions
@@ -80,7 +83,8 @@ instead.
 
 Starts, or renews, background recording in Play services. Resolves `ready` on success,
 otherwise the blocking status or `subscription_failed`. Concurrent calls share one
-subscription task. The subscription belongs to Play services, not your process, so it
+subscription task when no unsubscribe call is between them. Recording-state mutations
+run in invocation order. The subscription belongs to Play services, not your process, so it
 survives app restarts. Calling `subscribe()` on every launch is cheap and recommended.
 
 ### `unsubscribe(): Promise<void>`
@@ -88,37 +92,45 @@ survives app restarts. Calling `subscribe()` on every launch is cheap and recomm
 Stops recording. **Play services then drops access to everything recorded under the
 subscription**, and a later `subscribe()` starts from empty.
 
+Resolves only after Play services confirms removal. If the service cannot be reached,
+the operation is cancelled, or removal fails, it rejects with `ERR_UNSUBSCRIBE_FAILED`;
+the recording state is then unconfirmed. Start and stop requests run in invocation order.
+
 ### `readSteps(options): Promise<StepBucket[]>`
 
 ```ts
 readSteps({
   startTime: Date | string | number, // Date, ISO-8601, or epoch ms
   endTime?: Date | string | number,  // default: now; clamped to now
-  bucketMinutes?: number,            // default 15; must divide 1440
+  bucketMinutes?: number,            // default 15; whole number, 1..2,147,483,647
 });
 // => [{ startTime: '2026-10-08T12:00:00.000Z', endTime: '2026-10-08T12:15:00.000Z', steps: 42 }, ...]
 ```
 
 Read semantics:
 
-- **Buckets sit on a fixed UTC epoch grid** of `bucketMinutes` width. Two reads with
-  different start times return identical values for every bucket they share.
-- **The start is rounded up** to the next grid boundary, so a partially covered leading
-  bucket is left out rather than under-counted. Pass a boundary-aligned start if you need
-  that bucket.
-- **Retention:** Play services keeps up to 10 days (`RETENTION_DAYS`). Earlier starts are
-  clamped to the first whole bucket inside that window.
-- **The trailing bucket may be partial.** It ends at `endTime`, or now for the bucket in
-  progress.
-- **Buckets with zero steps are omitted.**
-- The first bucket of a fresh subscription may start mid-grid, at Play's first recorded
-  data point. It still never spans two grid cells.
+- **Exact effective range:** the requested start is clamped to exactly `now - 10 days`
+  (`RETENTION_DAYS`) and the requested end is clamped to exactly now. Neither boundary is
+  rounded to a grid. If those clamps leave no increasing range, the result is empty.
+- **Inclusive provider query:** Google documents both bounds passed to the local read as
+  inclusive. The library sends the effective millisecond bounds unchanged and performs no
+  `+/- 1 ms` conversion.
+- **Provider intervals:** `bucketMinutes` is any positive whole number accepted by the
+  provider's integer argument, including widths longer than a day or the query. Returned
+  start/end values are provider interval metadata clipped to the effective query when the
+  positive aggregates prove that clipping is safe. They are not promised to be half-open,
+  exclusive-ended, fixed to a UTC grid or identical across separate reads.
+- **Zeros and gaps:** a present empty dataset or a dataset summing to zero is returned as
+  an explicit zero bucket. A missing step dataset is omitted, and the library does not fill
+  gaps. A zero bucket does not prove continuous sensor observation over the interval.
+- **Count integrity:** every aggregate count and total must fit the non-negative native
+  return range. Positive aggregate intervals must fit both their original provider bucket
+  and the effective query. Ambiguous overhang is rejected rather than proportionally split.
 - `readSteps` does not subscribe for you. Call `subscribe()` first.
 
-**Local-day totals and time zones.** `bucketMinutes: 1440` gives UTC days, not local days.
-For local days, read 15-minute buckets from local midnight and sum them, as in the example
-above. Every real UTC offset is a multiple of 15 minutes, so local midnight always falls
-on a 15-minute boundary. Hourly buckets work only in whole-hour offsets.
+**Local-day totals and time zones.** For a local-day request, pass local midnight as the
+start and sum the returned provider buckets, as in the example above. Bucket metadata can
+depend on that request range and on what Play services returns.
 
 ### Errors
 
@@ -127,10 +139,10 @@ Rejections are `RecordingApiError` with a `code`:
 | Code | When |
 |---|---|
 | `ERR_INVALID_RANGE` | Unparseable times, or `endTime <= startTime` |
-| `ERR_INVALID_BUCKET` | `bucketMinutes` is not a whole divisor of 1440 |
+| `ERR_INVALID_BUCKET` | `bucketMinutes` is outside the whole-number range 1..2,147,483,647 |
 | `ERR_RECORDING_UNAVAILABLE` | Status is not `ready`; see `error.status` |
 | `ERR_READ_FAILED` | Play services read failed, or returned malformed buckets |
-| `ERR_UNSUBSCRIBE_FAILED` | Play services rejected `unsubscribe()` |
+| `ERR_UNSUBSCRIBE_FAILED` | Removal failed, was cancelled, or Play services was unavailable |
 | `ERR_UNSUPPORTED` | `readSteps` called off Android |
 | `ERR_NOT_LINKED` | Native module missing (not rebuilt, or Expo Go) |
 
@@ -143,9 +155,9 @@ Rejections are `RecordingApiError` with a `code`:
 
 Play services records without your app running, but it only keeps 10 days. If you need
 longer history, read periodically (for example from a background task or on each app
-open) and store the buckets yourself. Because closed buckets on the UTC grid are stable,
-overlapping reads can be upserted by `startTime`. The exception is the first bucket of a
-fresh subscription, which may start off-grid.
+open) and store the results yourself. Provider delivery timing and bucket identity are not
+finality guarantees. Consumers should reread a bounded overlap and reconcile it using an
+application-specific policy instead of blindly upserting by `startTime`.
 
 ## Compared with alternatives
 

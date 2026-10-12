@@ -18,6 +18,12 @@ import com.google.android.gms.fitness.data.LocalField
 import com.google.android.gms.fitness.request.LocalDataReadRequest
 import java.util.concurrent.TimeUnit
 
+private sealed interface ProviderMutationResult {
+  data class Subscribe(val status: String) : ProviderMutationResult
+  data object UnsubscribeSuccess : ProviderMutationResult
+  data class UnsubscribeFailure(val error: Throwable) : ProviderMutationResult
+}
+
 /** A subscription belongs to Play services, not to this process. Re-subscribing is a no-op there. */
 class RecordingApiModule(reactContext: ReactApplicationContext) :
   NativeRecordingApiSpec(reactContext) {
@@ -25,7 +31,10 @@ class RecordingApiModule(reactContext: ReactApplicationContext) :
   private val context: Context
     get() = reactApplicationContext.applicationContext
 
-  private val subscription = SubscriptionGate<String>()
+  private val mutations = MutationCoordinator<ProviderMutationResult>(
+    start = ::startMutation,
+    startFailure = { kind, error -> mutationFailure(kind, error) },
+  )
 
   override fun getStatus(promise: Promise) {
     promise.resolve(status())
@@ -36,41 +45,71 @@ class RecordingApiModule(reactContext: ReactApplicationContext) :
   }
 
   override fun subscribe(promise: Promise) {
-    val current = status()
-    if (current != STATUS_READY) {
-      promise.resolve(current)
-      return
-    }
-    if (!subscription.join { promise.resolve(it) }) return
-    try {
-      client().subscribe(LocalDataType.TYPE_STEP_COUNT_DELTA)
-        .addOnCompleteListener { task ->
-          subscription.finish(if (task.isSuccessful) status() else SUBSCRIPTION_FAILED)
-        }
-    } catch (error: Exception) {
-      subscription.finish(SUBSCRIPTION_FAILED)
+    mutations.enqueue(MutationKind.SUBSCRIBE) { result ->
+      when (result) {
+        is ProviderMutationResult.Subscribe -> promise.resolve(result.status)
+        else -> promise.resolve(SUBSCRIPTION_FAILED)
+      }
     }
   }
 
   override fun unsubscribe(promise: Promise) {
-    // Without a usable Play services there is no subscription to remove.
-    if (playServices() != ConnectionResult.SUCCESS) {
-      promise.resolve(null)
-      return
-    }
-    try {
-      client().unsubscribe(LocalDataType.TYPE_STEP_COUNT_DELTA)
-        .addOnSuccessListener { promise.resolve(null) }
-        .addOnFailureListener { error -> promise.reject(ERR_UNSUBSCRIBE_FAILED, error.message, error) }
-    } catch (error: Exception) {
-      promise.reject(ERR_UNSUBSCRIBE_FAILED, error.message, error)
+    mutations.enqueue(MutationKind.UNSUBSCRIBE) { result ->
+      when (result) {
+        ProviderMutationResult.UnsubscribeSuccess -> promise.resolve(null)
+        is ProviderMutationResult.UnsubscribeFailure ->
+          promise.reject(ERR_UNSUBSCRIBE_FAILED, result.error.message, result.error)
+        else -> promise.reject(ERR_UNSUBSCRIBE_FAILED, "Unexpected unsubscribe result")
+      }
     }
   }
 
+  private fun startMutation(
+    kind: MutationKind,
+    complete: (ProviderMutationResult) -> Unit,
+  ) {
+    when (kind) {
+      MutationKind.SUBSCRIBE -> {
+        val current = status()
+        if (current != STATUS_READY) {
+          complete(ProviderMutationResult.Subscribe(current))
+          return
+        }
+        client().subscribe(LocalDataType.TYPE_STEP_COUNT_DELTA)
+          .addOnCompleteListener { task ->
+            complete(ProviderMutationResult.Subscribe(
+              if (task.isSuccessful) STATUS_READY else SUBSCRIPTION_FAILED))
+          }
+      }
+      MutationKind.UNSUBSCRIBE -> {
+        val service = playServices()
+        if (service != ConnectionResult.SUCCESS) {
+          complete(ProviderMutationResult.UnsubscribeFailure(
+            IllegalStateException("Google Play services unavailable for unsubscribe: $service")))
+          return
+        }
+        client().unsubscribe(LocalDataType.TYPE_STEP_COUNT_DELTA)
+          .addOnCompleteListener { task ->
+            if (task.isSuccessful) {
+              complete(ProviderMutationResult.UnsubscribeSuccess)
+            } else {
+              complete(ProviderMutationResult.UnsubscribeFailure(
+                task.exception ?: IllegalStateException("Play services rejected unsubscribe")))
+            }
+          }
+      }
+    }
+  }
+
+  private fun mutationFailure(kind: MutationKind, error: Throwable): ProviderMutationResult =
+    when (kind) {
+      MutationKind.SUBSCRIBE -> ProviderMutationResult.Subscribe(SUBSCRIPTION_FAILED)
+      MutationKind.UNSUBSCRIBE -> ProviderMutationResult.UnsubscribeFailure(error)
+    }
+
   override fun readSteps(startMs: Double, endMs: Double, bucketMinutes: Double, promise: Promise) {
-    val bucket = bucketMs(bucketMinutes)
-    if (bucket == null) {
-      promise.reject(ERR_INVALID_BUCKET, "bucketMinutes must be a whole number that divides 1440")
+    if (bucketMs(bucketMinutes) == null) {
+      promise.reject(ERR_INVALID_BUCKET, "bucketMinutes must be a whole number from 1 through ${Int.MAX_VALUE}")
       return
     }
     val start = epochMs(startMs)
@@ -85,17 +124,17 @@ class RecordingApiModule(reactContext: ReactApplicationContext) :
       promise.reject(ERR_RECORDING_UNAVAILABLE, current)
       return
     }
-    val window = readWindow(start, end, System.currentTimeMillis(), bucket)
+    val window = readWindow(start, end, System.currentTimeMillis())
     if (window == null) {
       promise.resolve(Arguments.createArray())
       return
     }
-    val request = LocalDataReadRequest.Builder()
-      .setTimeRange(window.startMs, window.endMs, TimeUnit.MILLISECONDS)
-      .bucketByTime(bucketMinutes.toInt(), TimeUnit.MINUTES)
-      .aggregate(LocalDataType.TYPE_STEP_COUNT_DELTA)
-      .build()
     try {
+      val request = LocalDataReadRequest.Builder()
+        .setTimeRange(window.startMs, window.endMs, TimeUnit.MILLISECONDS)
+        .bucketByTime(bucketMinutes.toInt(), TimeUnit.MINUTES)
+        .aggregate(LocalDataType.TYPE_STEP_COUNT_DELTA)
+        .build()
       client().readData(request)
         .addOnSuccessListener { response ->
           if (!response.status.isSuccess) {
@@ -103,13 +142,23 @@ class RecordingApiModule(reactContext: ReactApplicationContext) :
             return@addOnSuccessListener
           }
           try {
-            val intervals = response.buckets.map { b ->
-              val count = b.getDataSet(LocalDataType.TYPE_STEP_COUNT_DELTA)
-                ?.dataPoints?.sumOf { it.getValue(LocalField.FIELD_STEPS).asInt().toLong() } ?: 0L
-              StepInterval(b.getStartTime(TimeUnit.MILLISECONDS), b.getEndTime(TimeUnit.MILLISECONDS), count)
+            val buckets = response.buckets.map { bucket ->
+              val points = bucket.getDataSet(LocalDataType.TYPE_STEP_COUNT_DELTA)
+                ?.dataPoints?.map { point ->
+                  AggregatePoint(
+                    point.getStartTime(TimeUnit.MILLISECONDS),
+                    point.getEndTime(TimeUnit.MILLISECONDS),
+                    point.getValue(LocalField.FIELD_STEPS).asInt().toLong(),
+                  )
+                }
+              ProviderBucket(
+                bucket.getStartTime(TimeUnit.MILLISECONDS),
+                bucket.getEndTime(TimeUnit.MILLISECONDS),
+                points,
+              )
             }
             val result = Arguments.createArray()
-            mapIntervals(window, intervals, bucket).forEach { interval ->
+            mapBuckets(window, buckets).forEach { interval ->
               result.pushMap(Arguments.createMap().apply {
                 putDouble("startMs", interval.startMs.toDouble())
                 putDouble("endMs", interval.endMs.toDouble())
@@ -130,8 +179,9 @@ class RecordingApiModule(reactContext: ReactApplicationContext) :
   private fun client(): LocalRecordingClient = FitnessLocal.getLocalRecordingClient(context)
 
   private fun hasSensor(): Boolean =
-    (context.getSystemService(Context.SENSOR_SERVICE) as SensorManager?)
-      ?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER) != null
+    hasStepCounterSensor(
+      (context.getSystemService(Context.SENSOR_SERVICE) as SensorManager?)
+        ?.getSensorList(Sensor.TYPE_STEP_COUNTER))
 
   private fun playServices(): Int =
     GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(
