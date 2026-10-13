@@ -1,6 +1,6 @@
 {
   "name": "react-native-recording-api",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "On-device Android step recording with Google's Recording API. No Google account. Works in Expo and React Native CLI apps.",
   "main": "./lib/module/index.js",
   "types": "./lib/typescript/src/index.d.ts",
